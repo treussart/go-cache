@@ -87,12 +87,24 @@ func New(name string, options ...CustomOption) (*Cache, error) {
 		},
 	}
 
-	return &Cache{
+	c := &Cache{
 		opt:        &config,
 		labelValue: name,
 		cb:         gobreaker.NewCircuitBreaker[[]byte](cbConf),
 		tracer:     otel.GetTracerProvider().Tracer(pkgName),
-	}, nil
+	}
+
+	for k, v := range config.preloadData {
+		pkey := c.addPrefixIfExist([]byte(k))
+		if c.opt.localCache != nil {
+			_ = c.opt.localCache.Set(pkey, v)
+		}
+		if c.opt.staleCache != nil {
+			_ = c.opt.staleCache.Set(pkey, v)
+		}
+	}
+
+	return c, nil
 }
 
 var _ Cacher = &Cache{}

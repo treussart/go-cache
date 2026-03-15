@@ -94,6 +94,7 @@ err = c.SetExStruct(ctx, "user:1", &User{Name: "Alice"}, 30*time.Second)
 | `WithCBMaxRequests(n)` | Max requests allowed in half-open state (default: 1) |
 | `WithCBConsecutiveFailures(n)` | Consecutive failures before tripping (default: 2) |
 | `WithGracefulDegradation(staleTTL)` | Enable stale cache fallback when CB is open (see below) |
+| `WithPreload(data)` | Warm up L1 on startup with initial key-value pairs (see below) |
 
 ## Interface
 
@@ -155,6 +156,27 @@ c, err := cache.New("my-service",
 - Only circuit breaker errors (open / too-many-requests) trigger a stale lookup. Regular Redis errors are surfaced normally.
 - `Del` clears both the primary L1 and the stale cache to maintain consistency.
 - A `cache_stale_hit_total` metric is emitted on each stale hit (both Prometheus and OpenTelemetry).
+
+## Cache preloading
+
+Warm up L1 on startup so the first requests hit the local cache instead of going to Redis:
+
+```go
+data := map[string][]byte{
+    "config:feature-flags": flagsJSON,
+    "config:rate-limits":   limitsJSON,
+}
+
+c, err := cache.New("my-service",
+    cache.WithLocalCacheTinyLFU(10000, time.Minute),
+    cache.WithRedisConn(redisClient, 5*time.Minute),
+    cache.WithPreload(data),
+)
+```
+
+- Data is written to L1 (and the stale cache if `WithGracefulDegradation` is also enabled).
+- Redis is not touched — preloading is strictly for the local layer.
+- Keys are subject to the configured prefix, just like regular `Set` calls.
 
 ## Coders
 

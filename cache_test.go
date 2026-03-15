@@ -1052,6 +1052,116 @@ func TestNew_GracefulDegradation_stale_hit_with_stats(t *testing.T) {
 	require.NotNil(t, val)
 }
 
+// --- Preload ---
+
+func TestNew_Preload_local_only(t *testing.T) {
+	data := map[string][]byte{
+		"user:1": []byte("Alice"),
+		"user:2": []byte("Bob"),
+	}
+	mycache, err := New("",
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithPreload(data),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	b, err := mycache.Get(context.Background(), []byte("user:1"))
+	require.NoError(t, err)
+	assert.Equal(t, "Alice", string(b))
+
+	b, err = mycache.Get(context.Background(), []byte("user:2"))
+	require.NoError(t, err)
+	assert.Equal(t, "Bob", string(b))
+}
+
+func TestNew_Preload_with_prefix(t *testing.T) {
+	data := map[string][]byte{
+		myKey: []byte(myValue),
+	}
+	mycache, err := New("test",
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithPreload(data),
+	)
+	require.NoError(t, err)
+
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+}
+
+func TestNew_Preload_with_graceful_degradation(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	data := map[string][]byte{
+		myKey: []byte(myValue),
+	}
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithPreload(data),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — L1 miss, but stale cache was preloaded
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+}
+
+func TestNew_Preload_empty_data(t *testing.T) {
+	mycache, err := New("",
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithPreload(map[string][]byte{}),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, ErrCacheMiss)
+	assert.Nil(t, b)
+}
+
+func TestNew_Preload_nil_data(t *testing.T) {
+	mycache, err := New("",
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithPreload(nil),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, ErrCacheMiss)
+	assert.Nil(t, b)
+}
+
+func TestNew_Preload_remote_only(t *testing.T) {
+	db, _ := redismock.NewClientMock()
+	data := map[string][]byte{
+		myKey: []byte(myValue),
+	}
+	// No local cache — preload has nothing to write to, but must not panic
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithPreload(data),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, mycache)
+}
+
 // --- Benchmarks ---
 
 func BenchmarkCache_FreeCache_Set(b *testing.B) {

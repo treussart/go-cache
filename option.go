@@ -19,6 +19,7 @@ type customConfig struct {
 	cbMaxRequests         uint32
 	cbConsecutiveFailures uint32
 	coder                 Coder
+	preloadData           map[string][]byte
 }
 
 // CustomOption is a functional option for configuring a simple Cache.
@@ -105,6 +106,15 @@ func WithCoder(v Coder) CustomOption {
 func WithPrefixKey(v []byte) CustomOption {
 	return func(c *customConfig) {
 		c.prefixKey = v
+	}
+}
+
+// WithPreload warms up the local cache (and stale cache if configured) on
+// startup with the provided key-value pairs. Data is written to L1 only;
+// Redis is not touched. Keys are subject to the configured prefix.
+func WithPreload(data map[string][]byte) CustomOption {
+	return func(c *customConfig) {
+		c.preloadData = data
 	}
 }
 
