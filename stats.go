@@ -2,7 +2,6 @@ package cache
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -239,9 +238,4 @@ func GetStatsOTEL(name string) (*StatsOTEL, error) {
 		CBState:           cbState,
 		Duration:          duration,
 	}, nil
-}
-
-// measureDuration calculates the time elapsed since the start time and returns it in seconds.
-func measureDuration(start time.Time) float64 {
-	return time.Since(start).Seconds()
 }
