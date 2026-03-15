@@ -20,6 +20,7 @@ type StatsProm struct {
 	MissesLocal       *prometheus.CounterVec
 	HitsRemote        *prometheus.CounterVec
 	MissesRemote      *prometheus.CounterVec
+	HitsStale         *prometheus.CounterVec
 	SetLocal          *prometheus.CounterVec
 	SetRemote         *prometheus.CounterVec
 	SetTotal          *prometheus.CounterVec
@@ -65,6 +66,15 @@ func GetStatsProm(metricNamespace, metricSubSystem string) *StatsProm {
 				Subsystem: metricSubSystem,
 				Name:      "cache_remote_miss_total",
 				Help:      "Number of times a key was not found in the remote cache",
+			},
+			[]string{LabelName},
+		),
+		HitsStale: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: metricSubSystem,
+				Name:      "cache_stale_hit_total",
+				Help:      "Number of times a stale cache hit saved a request during circuit breaker open state",
 			},
 			[]string{LabelName},
 		),
@@ -141,6 +151,7 @@ type StatsOTEL struct {
 	MissesLocal       metric.Float64Counter
 	HitsRemote        metric.Float64Counter
 	MissesRemote      metric.Float64Counter
+	HitsStale         metric.Float64Counter
 	SetLocal          metric.Float64Counter
 	SetRemote         metric.Float64Counter
 	SetTotal          metric.Float64Counter
@@ -173,6 +184,12 @@ func GetStatsOTEL(name string) (*StatsOTEL, error) {
 	}
 	missesRemote, err := meter.Float64Counter("cache_remote_miss_total",
 		metric.WithDescription("Number of times a key was not found in the remote cache."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("meter.Float64Counter: %w", err)
+	}
+	hitsStale, err := meter.Float64Counter("cache_stale_hit_total",
+		metric.WithDescription("Number of times a stale cache hit saved a request during circuit breaker open state."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("meter.Float64Counter: %w", err)
@@ -230,6 +247,7 @@ func GetStatsOTEL(name string) (*StatsOTEL, error) {
 		MissesLocal:       missesLocal,
 		HitsRemote:        hitsRemote,
 		MissesRemote:      missesRemote,
+		HitsStale:         hitsStale,
 		SetLocal:          setLocal,
 		SetRemote:         setRemote,
 		SetTotal:          setTotal,

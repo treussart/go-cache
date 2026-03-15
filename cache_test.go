@@ -893,6 +893,165 @@ func TestNew_SetExp_remote_error(t *testing.T) {
 	require.ErrorIs(t, err, ErrInitCache)
 }
 
+// --- Graceful degradation (stale cache) ---
+
+func TestNew_GracefulDegradation_stale_hit(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value while Redis is healthy — written to L1 + stale + Redis
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1 so next Get must go to Redis
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, err = mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, ErrInitCache)
+
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, err = mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, ErrInitCache)
+
+	// CB is open — L1 misses, but stale cache returns the value
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+}
+
+func TestNew_GracefulDegradation_stale_miss(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Trip the CB without storing anything
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — no data in stale cache either, error is returned
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, gobreaker.ErrOpenState)
+	assert.Nil(t, b)
+}
+
+func TestNew_GracefulDegradation_disabled(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — no graceful degradation, error is returned
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, gobreaker.ErrOpenState)
+	assert.Nil(t, b)
+}
+
+func TestNew_GracefulDegradation_Del_clears_stale(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, time.Minute),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Delete clears L1 + stale + Redis
+	mock.ExpectDel(myKey).SetVal(1)
+	require.NoError(t, mycache.Del(context.Background(), []byte(myKey)))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — stale cache was also cleared, so no fallback
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, gobreaker.ErrOpenState)
+	assert.Nil(t, b)
+}
+
+func TestNew_GracefulDegradation_stale_hit_with_stats(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	stats := GetStatsProm("", "")
+	mycache, err := New("test",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithStatsProm(stats),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — stale hit
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+
+	// Verify HitsStale counter was incremented
+	val := stats.HitsStale.WithLabelValues("test")
+	require.NotNil(t, val)
+}
+
 // --- Benchmarks ---
 
 func BenchmarkCache_FreeCache_Set(b *testing.B) {
@@ -972,6 +1131,53 @@ func BenchmarkCache_TinyLFU_Get_hit(b *testing.B) {
 func BenchmarkCache_TinyLFU_Get_miss(b *testing.B) {
 	c, _ := New("",
 		WithLocalCacheTinyLFU(10000, time.Minute),
+		WithPrefixKey(nil),
+	)
+	ctx := context.Background()
+	key := []byte("bench-miss")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = c.Get(ctx, key)
+	}
+}
+
+func BenchmarkCache_FreeCache_GracefulDeg_Set(b *testing.B) {
+	c, _ := New("",
+		WithLocalCacheFreeCache(1000000, time.Minute),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	ctx := context.Background()
+	key := []byte("bench-key")
+	value := []byte("bench-value")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = c.Set(ctx, key, value)
+	}
+}
+
+func BenchmarkCache_FreeCache_GracefulDeg_Get_hit(b *testing.B) {
+	c, _ := New("",
+		WithLocalCacheFreeCache(1000000, time.Minute),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	ctx := context.Background()
+	key := []byte("bench-key")
+	_ = c.Set(ctx, key, []byte("bench-value"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = c.Get(ctx, key)
+	}
+}
+
+func BenchmarkCache_FreeCache_GracefulDeg_Get_miss(b *testing.B) {
+	c, _ := New("",
+		WithLocalCacheFreeCache(1000000, time.Minute),
+		WithGracefulDegradation(1*time.Hour),
 		WithPrefixKey(nil),
 	)
 	ctx := context.Background()

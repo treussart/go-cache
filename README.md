@@ -93,6 +93,7 @@ err = c.SetExStruct(ctx, "user:1", &User{Name: "Alice"}, 30*time.Second)
 | `WithCBTimeout(d)` | Time in open state before half-open probe (default: 4 min) |
 | `WithCBMaxRequests(n)` | Max requests allowed in half-open state (default: 1) |
 | `WithCBConsecutiveFailures(n)` | Consecutive failures before tripping (default: 2) |
+| `WithGracefulDegradation(staleTTL)` | Enable stale cache fallback when CB is open (see below) |
 
 ## Interface
 
@@ -122,6 +123,38 @@ When enabled, all Redis operations go through a [gobreaker](https://github.com/s
 - **Half-open** — a limited number of probe requests are sent to Redis.
 
 `redis.Nil` (cache miss) is treated as a success and does not count toward tripping.
+
+## Graceful degradation
+
+When Redis goes down and the circuit breaker opens, `Get` normally returns an error for any key that is no longer in L1 (expired or evicted). With graceful degradation enabled, a **stale cache** (a separate in-memory TinyLFU with a longer TTL) is consulted before returning an error:
+
+```
+CB open + L1 miss
+    │
+    ▼
+┌────────────┐  hit   ┌─────────────────┐
+│ Stale cache│───────▶│ return stale data│
+└───┬────────┘        └─────────────────┘
+    │ miss
+    ▼
+return error
+```
+
+Enable it with:
+
+```go
+c, err := cache.New("my-service",
+    cache.WithRedisConn(redisClient, 5*time.Minute),
+    cache.WithLocalCacheTinyLFU(10000, time.Minute),
+    cache.WithCBEnabled(true),
+    cache.WithGracefulDegradation(1*time.Hour), // stale TTL
+)
+```
+
+- The stale cache is written on every `Set`/`SetExp`/`SetStruct`/`SetExStruct`, not only during degradation.
+- Only circuit breaker errors (open / too-many-requests) trigger a stale lookup. Regular Redis errors are surfaced normally.
+- `Del` clears both the primary L1 and the stale cache to maintain consistency.
+- A `cache_stale_hit_total` metric is emitted on each stale hit (both Prometheus and OpenTelemetry).
 
 ## Coders
 
@@ -162,7 +195,7 @@ c, _ := cache.New("my-cache",
 )
 ```
 
-Exposed metrics: `cache_local_hit_total`, `cache_local_miss_total`, `cache_remote_hit_total`, `cache_remote_miss_total`, `cache_local_set_total`, `cache_remote_set_total`, `cache_set_total`, `cache_cb_open_total`, `cache_cb_too_many_requests_total`, `cache_cb_state`, `cache_duration_seconds`.
+Exposed metrics: `cache_local_hit_total`, `cache_local_miss_total`, `cache_remote_hit_total`, `cache_remote_miss_total`, `cache_stale_hit_total`, `cache_local_set_total`, `cache_remote_set_total`, `cache_set_total`, `cache_cb_open_total`, `cache_cb_too_many_requests_total`, `cache_cb_state`, `cache_duration_seconds`.
 
 All metrics are labelled with `cache_name`.
 
@@ -191,6 +224,16 @@ Run with `go test -bench=. -benchmem ./...`
 | TinyLFU Set | 434 | 440 | 7 | −22 % | −22 % |
 | TinyLFU Get (hit) | 216 | 240 | 3 | −38 % | −50 % |
 | TinyLFU Get (miss) | 155 | 240 | 3 | −46 % | −50 % |
+
+	### Cache operations with graceful degradation (L1 + stale cache, raw bytes)
+
+| Benchmark | ns/op | B/op | allocs/op | vs. without GD |
+|-----------|------:|-----:|----------:|---------------:|
+| FreeCache Set | 521 | 440 | 7 | +4 allocs (stale TinyLFU write) |
+| FreeCache Get (hit) | 260 | 256 | 4 | 0 allocs overhead |
+| FreeCache Get (miss) | 288 | 304 | 5 | 0 allocs overhead |
+
+Set pays for the extra TinyLFU write into the stale cache. Get paths are unaffected because the stale cache is only consulted when the circuit breaker rejects a request.
 
 ### Cache operations (L1 only, struct roundtrip)
 

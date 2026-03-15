@@ -150,10 +150,14 @@ func (c *Cache) Del(ctx context.Context, key []byte) error {
 	return nil
 }
 
-// DeleteFromLocalCache removes a key from the local cache only.
+// DeleteFromLocalCache removes a key from the local cache and the stale cache.
 func (c *Cache) DeleteFromLocalCache(key []byte) {
+	pkey := c.addPrefixIfExist(key)
 	if c.opt.localCache != nil {
-		c.opt.localCache.Del(c.addPrefixIfExist(key))
+		c.opt.localCache.Del(pkey)
+	}
+	if c.opt.staleCache != nil {
+		c.opt.staleCache.Del(pkey)
 	}
 }
 
@@ -195,6 +199,10 @@ func (c *Cache) doSet(ctx context.Context, key, value []byte, ttl time.Duration)
 		if c.opt.statsOTEL != nil {
 			c.opt.statsOTEL.SetLocal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelName, c.labelValue)))
 		}
+	}
+
+	if c.opt.staleCache != nil {
+		_ = c.opt.staleCache.Set(pkey, value)
 	}
 
 	if c.opt.remoteCache != nil {
@@ -287,6 +295,20 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 		if c.handleCBError(ctx, err) {
 			if span.IsRecording() {
 				span.SetAttributes(attribute.Bool("cb.fallback", true))
+			}
+			if c.opt.staleCache != nil {
+				if staleData, staleErr := c.opt.staleCache.Get(pkey); staleErr == nil {
+					if c.opt.statsProm != nil {
+						c.opt.statsProm.HitsStale.WithLabelValues(c.labelValue).Inc()
+					}
+					if c.opt.statsOTEL != nil {
+						c.opt.statsOTEL.HitsStale.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelName, c.labelValue)))
+					}
+					if span.IsRecording() {
+						span.SetAttributes(attribute.Bool("hit.stale", true))
+					}
+					return staleData, nil
+				}
 			}
 			return nil, fmt.Errorf("remoteCache.Get: %w", err)
 		}
