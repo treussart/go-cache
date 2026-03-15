@@ -1,3 +1,5 @@
+// Package cache provides a two-level cache (local L1 + Redis L2) with
+// circuit breaker, Prometheus/OpenTelemetry metrics, and structured value support.
 package cache
 
 import (
@@ -134,7 +136,7 @@ func (c *Cache) startOp(ctx context.Context, spanName, cmd string) (context.Cont
 	if h.hasOTEL {
 		h.start = time.Now()
 	}
-	ctx, h.span = c.tracer.Start(ctx, spanName)
+	ctx, h.span = c.tracer.Start(ctx, spanName) //nolint:spancheck // span is closed by opHandle.End()
 	h.ctx = ctx
 	return ctx, h
 }
@@ -198,16 +200,17 @@ func (c *Cache) doSet(ctx context.Context, key, value []byte, ttl time.Duration)
 	if c.opt.remoteCache != nil {
 		remoteKey := string(pkey)
 		var err error
-		if c.opt.cbEnabled {
+		switch {
+		case c.opt.cbEnabled:
 			_, err = c.cb.Execute(func() ([]byte, error) {
 				if ttl > 0 {
 					return nil, c.opt.remoteCache.SetEx(ctx, remoteKey, value, ttl).Err()
 				}
 				return nil, c.opt.remoteCache.Set(ctx, remoteKey, value, c.opt.remoteCacheTTL).Err()
 			})
-		} else if ttl > 0 {
+		case ttl > 0:
 			err = c.opt.remoteCache.SetEx(ctx, remoteKey, value, ttl).Err()
-		} else {
+		default:
 			err = c.opt.remoteCache.Set(ctx, remoteKey, value, c.opt.remoteCacheTTL).Err()
 		}
 		if err != nil {
