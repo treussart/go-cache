@@ -1052,6 +1052,37 @@ func TestNew_GracefulDegradation_stale_hit_with_stats(t *testing.T) {
 	require.NotNil(t, val)
 }
 
+func TestNew_GracefulDegradation_zero_staleTTL(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(0), // never expire
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Trip the CB
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	_, _ = mycache.Get(context.Background(), []byte(myKey))
+
+	// CB is open — stale cache entry never expires, still returns the value
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+}
+
 // --- Preload ---
 
 func TestNew_Preload_local_only(t *testing.T) {
