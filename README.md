@@ -93,7 +93,7 @@ err = c.SetExStruct(ctx, "user:1", &User{Name: "Alice"}, 30*time.Second)
 | `WithCBTimeout(d)` | Time in open state before half-open probe (default: 4 min) |
 | `WithCBMaxRequests(n)` | Max requests allowed in half-open state (default: 1) |
 | `WithCBConsecutiveFailures(n)` | Consecutive failures before tripping (default: 2) |
-| `WithGracefulDegradation(staleTTL)` | Enable stale cache fallback when CB is open; 0 = never expire (see below) |
+| `WithGracefulDegradation(staleTTL, staleCacheSize...)` | Enable stale cache fallback; 0 TTL = never expire, optional size (default 10k) |
 | `WithPreload(data)` | Warm up L1 on startup with initial key-value pairs (see below) |
 
 ## Interface
@@ -157,7 +157,7 @@ c, err := cache.New("my-service",
 - `Del` clears both the primary L1 and the stale cache to maintain consistency.
 - A `cache_stale_hit_total` metric is emitted on each stale hit (both Prometheus and OpenTelemetry).
 - A `staleTTL` of `0` means entries never expire (they are only evicted when the cache is full).
-- Stale eviction — the stale TinyLFU holds 10k items. If you write more than 10k distinct keys, the LFU eviction policy may evict the preloaded fallback.
+- Stale eviction — the stale TinyLFU holds 10k items by default (override with the optional second argument, e.g. `WithGracefulDegradation(0, 50000)`). If you write more distinct keys than the configured size, the LFU eviction policy may evict the preloaded fallback.
 
 ## Cache preloading
 

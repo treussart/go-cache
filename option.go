@@ -122,11 +122,15 @@ func WithPreload(data map[string][]byte) CustomOption {
 // circuit breaker is open and the primary L1 misses. staleTTL controls how
 // long entries survive in the stale cache (should be significantly longer than
 // the primary L1 TTL). A zero staleTTL means entries never expire (eviction
-// still applies when the cache is full). Internally a TinyLFU cache of
-// 10 000 items is created.
-func WithGracefulDegradation(staleTTL time.Duration) CustomOption {
+// still applies when the cache is full). staleCacheSize sets the maximum number
+// of items in the stale TinyLFU cache; 0 defaults to 10 000.
+func WithGracefulDegradation(staleTTL time.Duration, staleCacheSize ...int) CustomOption {
 	const defaultStaleCacheSize = 10000
 	return func(c *customConfig) {
-		c.staleCache = NewTinyLFU(defaultStaleCacheSize, staleTTL)
+		size := defaultStaleCacheSize
+		if len(staleCacheSize) > 0 && staleCacheSize[0] > 0 {
+			size = staleCacheSize[0]
+		}
+		c.staleCache = NewTinyLFU(size, staleTTL)
 	}
 }
