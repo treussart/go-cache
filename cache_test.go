@@ -914,17 +914,20 @@ func TestNew_GracefulDegradation_stale_hit(t *testing.T) {
 	// Evict from primary L1 so next Get must go to Redis
 	mycache.opt.localCache.Del([]byte(myKey))
 
-	// Trip the CB
+	// Redis errors — stale cache serves the value on every attempt,
+	// both before and after the CB trips.
 	mock.ExpectGet(myKey).SetErr(ErrInitCache)
-	_, err = mycache.Get(context.Background(), []byte(myKey))
-	require.ErrorIs(t, err, ErrInitCache)
-
-	mock.ExpectGet(myKey).SetErr(ErrInitCache)
-	_, err = mycache.Get(context.Background(), []byte(myKey))
-	require.ErrorIs(t, err, ErrInitCache)
-
-	// CB is open — L1 misses, but stale cache returns the value
 	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	b, err = mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+
+	// CB is now open — stale still returns the value
+	b, err = mycache.Get(context.Background(), []byte(myKey))
 	require.NoError(t, err)
 	assert.Equal(t, myValue, string(b))
 }
@@ -1081,6 +1084,57 @@ func TestNew_GracefulDegradation_zero_staleTTL(t *testing.T) {
 	b, err := mycache.Get(context.Background(), []byte(myKey))
 	require.NoError(t, err)
 	assert.Equal(t, myValue, string(b))
+}
+
+func TestNew_GracefulDegradation_stale_on_redis_error_before_CB_trips(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithGracefulDegradation(1*time.Hour),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value while Redis is healthy
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// First Redis failure — CB is still closed, but stale cache should save us
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.NoError(t, err)
+	assert.Equal(t, myValue, string(b))
+}
+
+func TestNew_GracefulDegradation_no_stale_on_redis_error_without_GD(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	mycache, err := New("",
+		WithRedisConn(db, time.Minute),
+		WithLocalCacheFreeCache(1000, 1*time.Second),
+		WithCBEnabled(true),
+		WithCBTimeout(1*time.Second),
+		WithPrefixKey(nil),
+	)
+	require.NoError(t, err)
+
+	// Store a value
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetVal(myValue)
+	require.NoError(t, mycache.Set(context.Background(), []byte(myKey), []byte(myValue)))
+
+	// Evict from primary L1
+	mycache.opt.localCache.Del([]byte(myKey))
+
+	// Without GD, a Redis error before CB trips still returns the error
+	mock.ExpectGet(myKey).SetErr(ErrInitCache)
+	b, err := mycache.Get(context.Background(), []byte(myKey))
+	require.ErrorIs(t, err, ErrInitCache)
+	assert.Nil(t, b)
 }
 
 // --- Preload ---

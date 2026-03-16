@@ -153,10 +153,11 @@ c, err := cache.New("my-service",
 ```
 
 - The stale cache is written on every `Set`/`SetExp`/`SetStruct`/`SetExStruct`, not only during degradation.
-- Only circuit breaker errors (open / too-many-requests) trigger a stale lookup. Regular Redis errors are surfaced normally.
+- The stale cache is consulted on **any** Redis error (connection failure, timeout, CB open/too-many-requests). Only `redis.Nil` (genuine cache miss) is not covered.
 - `Del` clears both the primary L1 and the stale cache to maintain consistency.
 - A `cache_stale_hit_total` metric is emitted on each stale hit (both Prometheus and OpenTelemetry).
 - A `staleTTL` of `0` means entries never expire (they are only evicted when the cache is full).
+- Stale eviction — the stale TinyLFU holds 10k items. If you write more than 10k distinct keys, the LFU eviction policy may evict the preloaded fallback.
 
 ## Cache preloading
 
@@ -178,6 +179,39 @@ c, err := cache.New("my-service",
 - Data is written to L1 (and the stale cache if `WithGracefulDegradation` is also enabled).
 - Redis is not touched — preloading is strictly for the local layer.
 - Keys are subject to the configured prefix, just like regular `Set` calls.
+
+## Maximum resiliency example
+
+Combine circuit breaker, graceful degradation with a never-expiring stale cache, and
+preloading with a fallback value to guarantee that `Get` **always** returns data — even
+if Redis has never been reachable:
+
+```go
+// A sensible default that is returned when both L1 and Redis are unavailable
+// and no real value has ever been written for this key.
+fallback := map[string][]byte{
+    "config": []byte(`{"feature_x":false}`),
+}
+
+c, err := cache.New("my-service",
+    cache.WithRedisConn(redisClient, 5*time.Minute),
+    cache.WithLocalCacheTinyLFU(10000, time.Minute),
+    cache.WithCBEnabled(true),
+    cache.WithGracefulDegradation(0),  // stale entries never expire
+    cache.WithPreload(fallback),       // warm L1 + stale cache on startup
+)
+```
+
+What happens at runtime:
+
+1. **Normal operation** — `Get("config")` hits L1 or Redis as usual.
+2. **L1 expires, Redis healthy** — value is fetched from Redis and written back to L1.
+3. **Redis goes down, L1 still fresh** — L1 hit, no error.
+4. **Redis down, L1 expired** — circuit breaker is open, stale cache returns the last known value.
+5. **Redis has never been reachable** — the preloaded fallback is still in the stale cache (TTL = 0, never expires) and is returned.
+
+This makes the cache behave as a best-effort data source that degrades gracefully
+rather than failing.
 
 ## Coders
 

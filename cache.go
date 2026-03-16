@@ -308,19 +308,8 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 			if span.IsRecording() {
 				span.SetAttributes(attribute.Bool("cb.fallback", true))
 			}
-			if c.opt.staleCache != nil {
-				if staleData, staleErr := c.opt.staleCache.Get(pkey); staleErr == nil {
-					if c.opt.statsProm != nil {
-						c.opt.statsProm.HitsStale.WithLabelValues(c.labelValue).Inc()
-					}
-					if c.opt.statsOTEL != nil {
-						c.opt.statsOTEL.HitsStale.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelName, c.labelValue)))
-					}
-					if span.IsRecording() {
-						span.SetAttributes(attribute.Bool("hit.stale", true))
-					}
-					return staleData, nil
-				}
+			if data, ok := c.tryStale(ctx, pkey, span); ok {
+				return data, nil
 			}
 			return nil, fmt.Errorf("remoteCache.Get: %w", err)
 		}
@@ -338,6 +327,9 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 		}
 		span.SetStatus(codes.Error, "remoteCache.Get")
 		span.RecordError(err)
+		if data, ok := c.tryStale(ctx, pkey, span); ok {
+			return data, nil
+		}
 		return nil, fmt.Errorf("remoteCache.Get: %w", err)
 	}
 
@@ -394,6 +386,28 @@ func (c *Cache) handleCBError(ctx context.Context, err error) bool {
 		return true
 	}
 	return false
+}
+
+// tryStale attempts to serve data from the stale cache. Returns the data and
+// true on hit, or nil and false on miss (or when no stale cache is configured).
+func (c *Cache) tryStale(ctx context.Context, pkey []byte, span trace.Span) ([]byte, bool) {
+	if c.opt.staleCache == nil {
+		return nil, false
+	}
+	data, err := c.opt.staleCache.Get(pkey)
+	if err != nil {
+		return nil, false
+	}
+	if c.opt.statsProm != nil {
+		c.opt.statsProm.HitsStale.WithLabelValues(c.labelValue).Inc()
+	}
+	if c.opt.statsOTEL != nil {
+		c.opt.statsOTEL.HitsStale.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelName, c.labelValue)))
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Bool("hit.stale", true))
+	}
+	return data, true
 }
 
 func (c *Cache) addPrefixIfExist(key []byte) []byte {
