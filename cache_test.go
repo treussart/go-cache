@@ -189,7 +189,7 @@ func TestNew_RemoteCache_only_exp(t *testing.T) {
 	require.ErrorIs(t, err, ErrCacheMiss)
 	assert.Nil(t, b)
 
-	mock.ExpectSetEx(key, []byte(value), time.Minute).SetVal(value)
+	mock.ExpectSet(key, []byte(value), time.Minute).SetVal(value)
 	err = mycache.SetExp(context.Background(), []byte(key), []byte(value), time.Minute)
 	require.NoError(t, err)
 
@@ -417,10 +417,10 @@ func TestNew_Redis_CB_fallback_SetExp(t *testing.T) {
 	ttl := 5 * time.Second
 
 	// Trip the CB via failed SetExps
-	mock.ExpectSetEx(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
+	mock.ExpectSet(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
 	require.Error(t, mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), ttl))
 
-	mock.ExpectSetEx(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
+	mock.ExpectSet(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
 	require.Error(t, mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), ttl))
 
 	// CB is open — SetExp succeeds (L1 written, Redis skipped)
@@ -849,14 +849,14 @@ func TestNew_Redis_CB_SetExp_with_stats(t *testing.T) {
 	ttl := 5 * time.Second
 
 	// Successful SetExp
-	mock.ExpectSetEx(myKey, []byte(myValue), ttl).SetVal(myValue)
+	mock.ExpectSet(myKey, []byte(myValue), ttl).SetVal(myValue)
 	require.NoError(t, mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), ttl))
 
 	// Trip the CB
-	mock.ExpectSetEx(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
+	mock.ExpectSet(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
 	require.Error(t, mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), ttl))
 
-	mock.ExpectSetEx(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
+	mock.ExpectSet(myKey, []byte(myValue), ttl).SetErr(ErrInitCache)
 	require.Error(t, mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), ttl))
 
 	// CB is open — falls back to L1
@@ -887,7 +887,7 @@ func TestNew_SetExp_remote_error(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mock.ExpectSetEx(myKey, []byte(myValue), time.Minute).SetErr(ErrInitCache)
+	mock.ExpectSet(myKey, []byte(myValue), time.Minute).SetErr(ErrInitCache)
 	err = mycache.SetExp(context.Background(), []byte(myKey), []byte(myValue), time.Minute)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrInitCache)
