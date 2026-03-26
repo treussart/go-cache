@@ -1,4 +1,4 @@
-// Package cache provides a two-level cache (local L1 + Redis L2) with
+// Package cache provides a two-level cache (local L1 + remote L2) with
 // circuit breaker, Prometheus/OpenTelemetry metrics, and structured value support.
 package cache
 
@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 	"github.com/sony/gobreaker/v2"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,7 +24,7 @@ const (
 	defaultCBMaxRequests         = 1
 )
 
-// Cacher defines the interface for a two-level cache (local + Redis).
+// Cacher defines the interface for a two-level cache (local + remote).
 type Cacher interface {
 	Del(ctx context.Context, key []byte) error
 	Set(ctx context.Context, key, value []byte) error
@@ -39,7 +38,7 @@ type Cacher interface {
 	SetExStruct(context.Context, string, any, time.Duration) error
 }
 
-// Cache implements Cacher with optional local (L1) and Redis (L2) layers.
+// Cache implements Cacher with optional local (L1) and remote (L2) layers.
 type Cache struct {
 	opt        *customConfig
 	labelValue string
@@ -47,7 +46,7 @@ type Cache struct {
 	tracer     trace.Tracer
 }
 
-// New creates a new Cache. At least one of Redis or LocalCache must be set.
+// New creates a new Cache. At least one of RemoteCache or LocalCache must be set.
 func New(name string, options ...CustomOption) (*Cache, error) {
 	defaults := []CustomOption{
 		WithCBEnabled(false),
@@ -67,14 +66,14 @@ func New(name string, options ...CustomOption) (*Cache, error) {
 	}
 
 	cbConf := gobreaker.Settings{
-		Name:        "Redis Cache Circuit Breaker",
+		Name:        "Remote Cache Circuit Breaker",
 		Timeout:     config.cbTimeout,
 		MaxRequests: config.cbMaxRequests,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures >= config.cbConsecutiveFailures
 		},
 		IsSuccessful: func(err error) bool {
-			return err == nil || errors.Is(err, redis.Nil)
+			return err == nil || errors.Is(err, ErrCacheMiss)
 		},
 		OnStateChange: func(_ string, _ gobreaker.State, to gobreaker.State) {
 			if config.statsProm != nil && config.statsProm.CBState != nil {
@@ -173,14 +172,13 @@ func (c *Cache) DeleteFromLocalCache(key []byte) {
 	}
 }
 
-// DeleteFromRemoteCache removes a key from the Redis remote cache only.
+// DeleteFromRemoteCache removes a key from the remote cache only.
 func (c *Cache) DeleteFromRemoteCache(ctx context.Context, key []byte) error {
 	if len(key) == 0 {
 		return ErrKeyEmpty
 	}
 	if c.opt.remoteCache != nil {
-		err := c.opt.remoteCache.Del(ctx, string(c.addPrefixIfExist(key))).Err()
-		if err != nil {
+		if err := c.opt.remoteCache.Del(ctx, string(c.addPrefixIfExist(key))); err != nil {
 			return fmt.Errorf("remoteCache.Del: %w", err)
 		}
 	}
@@ -219,19 +217,17 @@ func (c *Cache) doSet(ctx context.Context, key, value []byte, ttl time.Duration)
 
 	if c.opt.remoteCache != nil {
 		remoteKey := string(pkey)
+		remoteTTL := c.opt.remoteCacheTTL
+		if ttl > 0 {
+			remoteTTL = ttl
+		}
 		var err error
-		switch {
-		case c.opt.cbEnabled:
+		if c.opt.cbEnabled {
 			_, err = c.cb.Execute(func() ([]byte, error) {
-				if ttl > 0 {
-					return nil, c.opt.remoteCache.SetEx(ctx, remoteKey, value, ttl).Err()
-				}
-				return nil, c.opt.remoteCache.Set(ctx, remoteKey, value, c.opt.remoteCacheTTL).Err()
+				return nil, c.opt.remoteCache.Set(ctx, remoteKey, value, remoteTTL)
 			})
-		case ttl > 0:
-			err = c.opt.remoteCache.SetEx(ctx, remoteKey, value, ttl).Err()
-		default:
-			err = c.opt.remoteCache.Set(ctx, remoteKey, value, c.opt.remoteCacheTTL).Err()
+		} else {
+			err = c.opt.remoteCache.Set(ctx, remoteKey, value, remoteTTL)
 		}
 		if err != nil {
 			if c.handleCBError(ctx, err) {
@@ -298,10 +294,10 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 	remoteKey := string(pkey)
 	if c.opt.cbEnabled {
 		b, err = c.cb.Execute(func() ([]byte, error) {
-			return c.opt.remoteCache.Get(ctx, remoteKey).Bytes()
+			return c.opt.remoteCache.Get(ctx, remoteKey)
 		})
 	} else {
-		b, err = c.opt.remoteCache.Get(ctx, remoteKey).Bytes()
+		b, err = c.opt.remoteCache.Get(ctx, remoteKey)
 	}
 	if err != nil {
 		if c.handleCBError(ctx, err) {
@@ -313,7 +309,7 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("remoteCache.Get: %w", err)
 		}
-		if errors.Is(err, redis.Nil) {
+		if errors.Is(err, ErrCacheMiss) {
 			if c.opt.statsProm != nil {
 				c.opt.statsProm.MissesRemote.WithLabelValues(c.labelValue).Inc()
 			}
@@ -353,10 +349,10 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 	return b, nil
 }
 
-// Ready checks whether the Redis connection is healthy.
+// Ready checks whether the remote cache connection is healthy.
 func (c *Cache) Ready(ctx context.Context) error {
 	if c.opt.remoteCache != nil {
-		if err := c.opt.remoteCache.Ping(ctx).Err(); err != nil {
+		if err := c.opt.remoteCache.Ping(ctx); err != nil {
 			return fmt.Errorf("remoteCache.Ping: %w", err)
 		}
 	}
@@ -450,7 +446,7 @@ func (c *Cache) SetExp(ctx context.Context, key, value []byte, ttl time.Duration
 	return c.doSet(ctx, key, value, ttl)
 }
 
-// Get retrieves a value by key, checking the local cache first, then falling back to Redis.
+// Get retrieves a value by key, checking the local cache first, then falling back to the remote cache.
 func (c *Cache) Get(ctx context.Context, key []byte) ([]byte, error) {
 	ctx, op := c.startOp(ctx, pkgName+".Get", "Get")
 	defer op.End()

@@ -2,8 +2,6 @@ package cache
 
 import (
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type customConfig struct {
@@ -11,7 +9,7 @@ type customConfig struct {
 	staleCache            LocalCache
 	statsProm             *StatsProm
 	statsOTEL             *StatsOTEL
-	remoteCache           redis.UniversalClient
+	remoteCache           RemoteCache
 	remoteCacheTTL        time.Duration
 	prefixKey             []byte
 	cbEnabled             bool
@@ -39,10 +37,10 @@ func WithStatsOTEL(stats *StatsOTEL) CustomOption {
 	}
 }
 
-// WithRedisConn sets the Redis connection and remote cache TTL.
-func WithRedisConn(conn redis.UniversalClient, remoteCacheTTL time.Duration) CustomOption {
+// WithRemoteCache sets the remote cache (L2) implementation and its default TTL.
+func WithRemoteCache(rc RemoteCache, remoteCacheTTL time.Duration) CustomOption {
 	return func(c *customConfig) {
-		c.remoteCache = conn
+		c.remoteCache = rc
 		c.remoteCacheTTL = remoteCacheTTL
 	}
 }
@@ -67,7 +65,7 @@ func WithLocalCacheFreeCache(cacheSize int, localCacheTTL time.Duration) CustomO
 	}
 }
 
-// WithCBEnabled enables or disables the circuit breaker for Redis operations.
+// WithCBEnabled enables or disables the circuit breaker for remote cache operations.
 func WithCBEnabled(v bool) CustomOption {
 	return func(c *customConfig) {
 		c.cbEnabled = v
@@ -111,7 +109,7 @@ func WithPrefixKey(v []byte) CustomOption {
 
 // WithPreload warms up the local cache (and stale cache if configured) on
 // startup with the provided key-value pairs. Data is written to L1 only;
-// Redis is not touched. Keys are subject to the configured prefix.
+// the remote cache is not touched. Keys are subject to the configured prefix.
 func WithPreload(data map[string][]byte) CustomOption {
 	return func(c *customConfig) {
 		c.preloadData = data
