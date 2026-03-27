@@ -269,6 +269,9 @@ func (c *Cache) get(ctx context.Context, key []byte) ([]byte, error) {
 			if c.opt.statsProm != nil {
 				c.opt.statsProm.HitsLocal.WithLabelValues(c.labelValue).Inc()
 			}
+			if c.opt.statsOTEL != nil {
+				c.opt.statsOTEL.HitsLocal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelName, c.labelValue)))
+			}
 			if span.IsRecording() {
 				span.SetAttributes(attribute.Bool("hit.local", true))
 			}
